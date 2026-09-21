@@ -68,6 +68,8 @@ import {
   basePluginContextMeta,
 } from './server/pluginContainer'
 import { ssrManifestPlugin } from './ssr/ssrManifestPlugin'
+import { buildAppWithTransactionalPublish } from './transactionalPublish'
+import type { TransactionalPublishOptions } from './transactionalPublish'
 import type { RollupPluginHooks } from './typeUtils'
 import {
   arraify,
@@ -1805,6 +1807,16 @@ export interface BuilderOptions {
    */
   sharedPlugins?: boolean
   buildApp?: (builder: ViteBuilder) => Promise<void>
+  /**
+   * Enables transactional publishing for the app build. When set, all
+   * environments write to a unique staging tree inside
+   * `transactionalPublish.publishRoot` first and the publish tree is only
+   * replaced after every environment (including finalization hooks such as
+   * `closeBundle`) has been built successfully.
+   *
+   * @experimental
+   */
+  transactionalPublish?: TransactionalPublishOptions
 }
 
 const _builderOptionsDefaults = Object.freeze({
@@ -1825,7 +1837,10 @@ export function resolveBuilderOptions(
   )
 }
 
-export type ResolvedBuilderOptions = Required<BuilderOptions>
+export type ResolvedBuilderOptions = Required<
+  Omit<BuilderOptions, 'transactionalPublish'>
+> &
+  Pick<BuilderOptions, 'transactionalPublish'>
 
 /**
  * Creates a ViteBuilder to orchestrate building multiple environments.
@@ -1857,38 +1872,49 @@ export async function createBuilder(
     environments,
     config,
     async buildApp() {
-      const pluginContext = new BasicMinimalPluginContext(
-        { ...basePluginContextMeta, watchMode: false },
-        config.logger,
-      )
+      const runBuildApp = async () => {
+        const pluginContext = new BasicMinimalPluginContext(
+          { ...basePluginContextMeta, watchMode: false },
+          config.logger,
+        )
 
-      // order 'pre' and 'normal' hooks are run first, then config.builder.buildApp, then 'post' hooks
-      let configBuilderBuildAppCalled = false
-      for (const p of config.getSortedPlugins('buildApp')) {
-        const hook = p.buildApp
-        if (
-          !configBuilderBuildAppCalled &&
-          typeof hook === 'object' &&
-          hook.order === 'post'
-        ) {
-          configBuilderBuildAppCalled = true
+        // order 'pre' and 'normal' hooks are run first, then config.builder.buildApp, then 'post' hooks
+        let configBuilderBuildAppCalled = false
+        for (const p of config.getSortedPlugins('buildApp')) {
+          const hook = p.buildApp
+          if (
+            !configBuilderBuildAppCalled &&
+            typeof hook === 'object' &&
+            hook.order === 'post'
+          ) {
+            configBuilderBuildAppCalled = true
+            await configBuilder.buildApp(builder)
+          }
+          const handler = getHookHandler(hook)
+          await handler.call(pluginContext, builder)
+        }
+        if (!configBuilderBuildAppCalled) {
           await configBuilder.buildApp(builder)
         }
-        const handler = getHookHandler(hook)
-        await handler.call(pluginContext, builder)
-      }
-      if (!configBuilderBuildAppCalled) {
-        await configBuilder.buildApp(builder)
-      }
-      // fallback to building all environments if no environments have been built
-      if (
-        Object.values(builder.environments).every(
-          (environment) => !environment.isBuilt,
-        )
-      ) {
-        for (const environment of Object.values(builder.environments)) {
-          await builder.build(environment)
+        // fallback to building all environments if no environments have been built
+        if (
+          Object.values(builder.environments).every(
+            (environment) => !environment.isBuilt,
+          )
+        ) {
+          for (const environment of Object.values(builder.environments)) {
+            await builder.build(environment)
+          }
         }
+      }
+      if (configBuilder.transactionalPublish) {
+        await buildAppWithTransactionalPublish(
+          builder,
+          configBuilder.transactionalPublish,
+          runBuildApp,
+        )
+      } else {
+        await runBuildApp()
       }
     },
     async build(

@@ -163,6 +163,11 @@ export type {
   ResolvedModulePreloadOptions,
   ResolveModulePreloadDependenciesFn,
 } from './build'
+export { TransactionalPublishError } from './transactionalPublish'
+export type {
+  TransactionalPublishOptions,
+  TransactionalPublishPhase,
+} from './transactionalPublish'
 export type {
   PreviewOptions,
   PreviewServer,
