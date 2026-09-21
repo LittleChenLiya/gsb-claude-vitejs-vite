@@ -11,6 +11,25 @@ import {
 } from '../utils'
 import type { TransformResult } from './transformRequest'
 
+export interface TransformCacheStats {
+  /**
+   * Number of transform results currently kept in the cache
+   */
+  readonly entries: number
+  /**
+   * Sum of the billed bytes of the cached transform results. The billed
+   * size of a result is the number of bytes of its UTF-8 encoded code
+   * plus the number of bytes of its serialized source map. It is a
+   * reproducible estimate of the cached content, not a measure of the
+   * process heap usage.
+   */
+  readonly bytes: number
+  /**
+   * Number of cached transform results evicted by the LRU budget
+   */
+  readonly evictions: number
+}
+
 export class EnvironmentModuleNode {
   environment: string
   /**
@@ -95,6 +114,22 @@ export class EnvironmentModuleGraph {
   etagToModuleMap: Map<string, EnvironmentModuleNode> = new Map()
   // a single file may corresponds to multiple modules with different queries
   fileToModulesMap: Map<string, Set<EnvironmentModuleNode>> = new Map()
+
+  /**
+   * Budget in bytes for the transform result cache. When set, completed
+   * transform results are billed (UTF-8 encoded code + serialized map) and
+   * the least recently used results are evicted once the budget is exceeded.
+   * `undefined` disables the budget and keeps every result (default behavior).
+   * @internal
+   */
+  _transformCacheBudget: number | undefined = undefined
+  // Modules with a cached transform result, billed by result size and kept
+  // in recency order (least recently used first). Only populated when
+  // `_transformCacheBudget` is set. Pending requests are never tracked here,
+  // so in-flight processing is never evictable.
+  private _transformCache: Map<EnvironmentModuleNode, number> = new Map()
+  private _transformCacheBytes = 0
+  private _transformCacheEvictions = 0
 
   /**
    * @internal
@@ -205,6 +240,7 @@ export class EnvironmentModuleGraph {
     const etag = mod.transformResult?.etag
     if (etag) this.etagToModuleMap.delete(etag)
 
+    this._untrackTransformResult(mod)
     mod.transformResult = null
 
     mod.ssrModule = null
@@ -431,6 +467,27 @@ export class EnvironmentModuleGraph {
     mod: EnvironmentModuleNode,
     result: TransformResult | null,
   ): void {
+    this._untrackTransformResult(mod)
+
+    if (result != null && this._transformCacheBudget !== undefined) {
+      const size = billTransformResult(result)
+      if (size > this._transformCacheBudget) {
+        // A single result bigger than the budget is still returned to the
+        // current request, but it isn't kept in the cache
+        result = null
+      } else {
+        // Evict the least recently used results until the new result fits
+        while (
+          this._transformCacheBytes + size > this._transformCacheBudget &&
+          this._transformCache.size > 0
+        ) {
+          this._evictTransformResult(this._transformCache.keys().next().value!)
+        }
+        this._transformCache.set(mod, size)
+        this._transformCacheBytes += size
+      }
+    }
+
     if (this.environment === 'client') {
       const prevEtag = mod.transformResult?.etag
       if (prevEtag) this.etagToModuleMap.delete(prevEtag)
@@ -438,6 +495,70 @@ export class EnvironmentModuleGraph {
     }
 
     mod.transformResult = result
+  }
+
+  /**
+   * Readonly stats of the transform result cache. Only entry count, billed
+   * bytes and eviction count are exposed, never the cached content.
+   */
+  get transformCacheStats(): TransformCacheStats {
+    return Object.freeze({
+      entries: this._transformCache.size,
+      bytes: this._transformCacheBytes,
+      evictions: this._transformCacheEvictions,
+    })
+  }
+
+  /**
+   * Mark the cached transform result of a module as the most recently used.
+   * @internal
+   */
+  _touchTransformResult(mod: EnvironmentModuleNode): void {
+    const size = this._transformCache.get(mod)
+    if (size === undefined) return
+    this._transformCache.delete(mod)
+    this._transformCache.set(mod, size)
+  }
+
+  /**
+   * Drop every cached transform result tracked by the budget and reset the
+   * cache stats. Module graph nodes and dependency edges are kept.
+   * @internal
+   */
+  _clearTransformResultCache(): void {
+    for (const mod of this._transformCache.keys()) {
+      if (mod.transformResult) {
+        if (this.environment === 'client' && mod.transformResult.etag) {
+          this.etagToModuleMap.delete(mod.transformResult.etag)
+        }
+        mod.transformResult = null
+      }
+    }
+    this._transformCache.clear()
+    this._transformCacheBytes = 0
+    this._transformCacheEvictions = 0
+  }
+
+  private _evictTransformResult(mod: EnvironmentModuleNode): void {
+    this._untrackTransformResult(mod)
+    this._transformCacheEvictions++
+    // Only the cached result is dropped, the module node and its dependency
+    // edges stay in the graph. The module is re-transformed on next request.
+    if (mod.transformResult) {
+      // Remove the stale etag so conditional requests don't get a 304 for
+      // a result that is no longer cached
+      if (this.environment === 'client' && mod.transformResult.etag) {
+        this.etagToModuleMap.delete(mod.transformResult.etag)
+      }
+      mod.transformResult = null
+    }
+  }
+
+  private _untrackTransformResult(mod: EnvironmentModuleNode): void {
+    const size = this._transformCache.get(mod)
+    if (size === undefined) return
+    this._transformCache.delete(mod)
+    this._transformCacheBytes -= size
   }
 
   getModuleByEtag(etag: string): EnvironmentModuleNode | undefined {
@@ -486,4 +607,16 @@ export class EnvironmentModuleGraph {
     }
     return [url, resolvedId, resolved?.meta]
   }
+}
+
+/**
+ * Billed size of a transform result: the number of bytes of its UTF-8
+ * encoded code plus the number of bytes of its serialized source map.
+ */
+function billTransformResult(result: TransformResult): number {
+  let size = Buffer.byteLength(result.code, 'utf8')
+  if (result.map) {
+    size += Buffer.byteLength(JSON.stringify(result.map), 'utf8')
+  }
+  return size
 }

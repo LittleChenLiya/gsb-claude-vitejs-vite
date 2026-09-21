@@ -225,6 +225,7 @@ export type {
   EnvironmentModuleGraph,
   EnvironmentModuleNode,
   ResolvedUrl,
+  TransformCacheStats,
 } from './server/moduleGraph'
 export type { SendOptions } from './server/send'
 export type { ProxyOptions } from './server/middlewares/proxy'

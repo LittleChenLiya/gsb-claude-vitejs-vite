@@ -256,6 +256,28 @@ export interface DevEnvironmentOptions {
    * This option can also be used instead of the removed config.experimental.skipSsrTransform.
    */
   moduleRunnerTransform?: boolean
+
+  /**
+   * Budget in bytes for the transform result cache of this environment.
+   * Each environment has its own independent budget.
+   *
+   * Completed transform results are billed by the number of bytes of their
+   * UTF-8 encoded code plus the number of bytes of their serialized source
+   * map. When adding a result would exceed the budget, the least recently
+   * used cached results are evicted. Only the cached results are dropped,
+   * module graph nodes and dependency edges are kept, and in-flight
+   * requests are never evictable. A single result bigger than the budget is
+   * still returned to its request, but isn't kept in the cache. A budget of
+   * `0` keeps no completed results, while concurrent requests for the same
+   * module still share the same pending transformation.
+   *
+   * The billed bytes are a reproducible estimate of the cached content, not
+   * a measure of the process heap usage.
+   *
+   * @default undefined (no budget, every transform result is kept)
+   * @experimental
+   */
+  transformCacheBudget?: number
 }
 
 function defaultCreateClientDevEnvironment(
@@ -276,12 +298,13 @@ function defaultCreateDevEnvironment(name: string, config: ResolvedConfig) {
 
 export type ResolvedDevEnvironmentOptions = Omit<
   Required<DevEnvironmentOptions>,
-  'sourcemapIgnoreList'
+  'sourcemapIgnoreList' | 'transformCacheBudget'
 > & {
   sourcemapIgnoreList: Exclude<
     DevEnvironmentOptions['sourcemapIgnoreList'],
     false | undefined
   >
+  transformCacheBudget: number | undefined
 }
 
 type AllResolveOptions = ResolveOptions & {
@@ -861,6 +884,8 @@ const configDefaults = Object.freeze({
     // createEnvironment
     // recoverable
     // moduleRunnerTransform
+    /** @experimental */
+    transformCacheBudget: undefined,
   },
   build: buildEnvironmentOptionsDefaults,
   resolve: {

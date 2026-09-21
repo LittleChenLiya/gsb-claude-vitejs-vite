@@ -230,6 +230,7 @@ async function getCachedTransformResult(
   const cached = module.transformResult
   if (cached) {
     debugCache?.(`[memory] ${prettyUrl}`)
+    environment.moduleGraph._touchTransformResult(module)
     return cached
   }
 }

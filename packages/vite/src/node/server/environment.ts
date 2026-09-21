@@ -28,7 +28,7 @@ import type {
 import { getShortName, normalizeHotChannel, updateModules } from './hmr'
 import { buildErrorMessage } from './middlewares/error'
 import { EnvironmentModuleGraph } from './moduleGraph'
-import type { EnvironmentModuleNode } from './moduleGraph'
+import type { EnvironmentModuleNode, TransformCacheStats } from './moduleGraph'
 import type { EnvironmentPluginContainer } from './pluginContainer'
 import {
   ERR_CLOSED_SERVER,
@@ -139,6 +139,7 @@ export class DevEnvironment extends BaseEnvironment {
     this.moduleGraph = new EnvironmentModuleGraph(name, (url: string) =>
       this.pluginContainer!.resolveId(url, undefined),
     )
+    this.moduleGraph._transformCacheBudget = options.dev.transformCacheBudget
 
     this._crawlEndFinder = setupOnCrawlEnd()
 
@@ -301,6 +302,17 @@ export class DevEnvironment extends BaseEnvironment {
     return transformRequest(this, url, { skipFsCheck: this._skipFsCheck })
   }
 
+  /**
+   * Readonly stats of the transform result cache for this environment.
+   * Only the number of cached entries, the billed bytes and the number of
+   * evictions are exposed. The billed bytes are a reproducible estimate of
+   * the cached content (UTF-8 encoded code + serialized source maps), not
+   * a measure of the process heap usage.
+   */
+  get transformCacheStats(): TransformCacheStats {
+    return this.moduleGraph.transformCacheStats
+  }
+
   async warmupRequest(url: string): Promise<void> {
     if (this.bundledDev) {
       // no-op
@@ -385,6 +397,7 @@ export class DevEnvironment extends BaseEnvironment {
         }
       })(),
     ])
+    this.moduleGraph._clearTransformResultCache()
   }
 
   /**

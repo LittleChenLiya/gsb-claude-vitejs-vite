@@ -60,6 +60,14 @@ class DevEnvironment {
    */
   pluginContainer: EnvironmentPluginContainer
   /**
+   * Readonly stats of the transform result cache for this environment.
+   * Only the number of cached entries, the billed bytes, and the number
+   * of evictions are exposed. The billed bytes are a reproducible
+   * estimate of the cached content (UTF-8 encoded code + serialized
+   * source maps), not a measure of the process heap usage.
+   */
+  transformCacheStats: TransformCacheStats
+  /**
    * Resolved config options for this environment. Options at the server
    * global scope are taken as defaults for all environments, and can
    * be overridden (resolve conditions, external, optimizedDeps)
@@ -100,6 +108,19 @@ class DevEnvironment {
 }
 ```
 
+with `TransformCacheStats` being:
+
+```ts
+interface TransformCacheStats {
+  /** Number of cached transform results */
+  readonly entries: number
+  /** Sum of the billed bytes of the cached transform results */
+  readonly bytes: number
+  /** Number of cached results evicted by the LRU budget */
+  readonly evictions: number
+}
+```
+
 With `DevEnvironmentContext` being:
 
 ```ts
@@ -130,6 +151,42 @@ An environment instance in the Vite server lets you process a URL using the `env
 
 :::info transformRequest naming
 We are using `transformRequest(url)` and `warmupRequest(url)` in the current version of this proposal so it is easier to discuss and understand for users used to Vite's current API. Before releasing, we can take the opportunity to review these names too. For example, it could be named `environment.processModule(url)` or `environment.loadModule(url)` taking a page from Rollup's `context.load(id)` in plugin hooks. For the moment, we think keeping the current names and delaying this discussion is better.
+:::
+
+## Transform Cache Budget
+
+For large projects, the memory held by cached transform results can be bounded per dev environment with `dev.transformCacheBudget`:
+
+```js
+export default {
+  environments: {
+    client: {
+      dev: {
+        // keep at most ~32 MB of cached transform results
+        transformCacheBudget: 32 * 1024 * 1024,
+      },
+    },
+    ssr: {
+      dev: {
+        // each environment has its own independent budget
+        transformCacheBudget: 16 * 1024 * 1024,
+      },
+    },
+  },
+}
+```
+
+Each completed transform result is billed by the number of bytes of its UTF-8 encoded code plus the number of bytes of its serialized source map. When adding a result would exceed the budget, the least recently used cached results are evicted. Only the cached results are dropped: module graph nodes and dependency edges are kept, and in-flight requests are never evictable. A single result bigger than the budget is still returned to its request, but isn't kept in the cache. A budget of `0` keeps no completed results, while concurrent requests for the same module still share the same pending transformation. If the option isn't set (the default), every transform result is kept as before.
+
+The current state of the cache can be inspected through the readonly `environment.transformCacheStats` property, which only exposes counters and never the cached source code:
+
+```js
+const { entries, bytes, evictions } =
+  server.environments.client.transformCacheStats
+```
+
+::: warning
+The billed bytes are a reproducible estimate of the cached content, not a measure of the whole process heap memory. The actual memory used by the dev server also depends on the module graph, source map objects, and other internal state.
 :::
 
 ## Separate Module Graphs
