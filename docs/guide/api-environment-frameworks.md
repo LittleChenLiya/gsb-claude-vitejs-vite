@@ -355,6 +355,41 @@ await builder.buildApp()
 
 `createBuilder` supersedes the standalone `build` function for environment-aware builds. `build` still works as the simple entry point for the legacy client-only and ssr-only builds described above, but it cannot build arbitrary environments. Running `builder.buildApp()` is the programmatic equivalent of `vite build --app`.
 
+### Transactional publishing
+
+- **Type:** `{ publishRoot: string }`
+- **Experimental**
+
+By default, every environment writes directly to its own `build.outDir`, so a failed build can leave a half-updated set of files being served. With `builder.transactionalPublish`, `builder.buildApp()` (and `vite build --app`) only replaces the published output once **every** environment — including finalization hooks like `closeBundle` — has succeeded:
+
+```js [vite.config.js]
+export default defineConfig({
+  environments: {
+    client: { build: { outDir: 'dist/client' } },
+    ssr: { build: { outDir: 'dist/ssr' } },
+  },
+  builder: {
+    transactionalPublish: { publishRoot: 'dist' },
+  },
+})
+```
+
+When enabled:
+
+- Every environment's `outDir` must be inside `publishRoot` (resolved against the project root) and the output directories must not overlap. The publish root cannot be the project root or a filesystem root. Invalid layouts are rejected before anything is built.
+- Each build writes to a unique staging directory `.vite-staging-*` next to the publish root (guaranteeing the same filesystem). The staging tree mirrors the publish root layout, so relative links between environment outputs, manifests, and source maps stay valid after publishing and never contain staging paths.
+- If any environment fails, only that build's staging directory is removed; the previously published tree is left untouched.
+- On success, the previous publish tree is first renamed to `<publishRoot>.vite-backup` and then the staging tree is renamed into place. If the second rename fails, the previous tree is restored. If the restore itself fails, both the backup and the staging directory are kept on disk and the build rejects with a `TransactionalPublishError` whose `phase` (`'validate' | 'backup' | 'publish' | 'restore'`) identifies the failed stage — the last usable output is never deleted.
+- Overlapping builds targeting the same publish root in the same process are rejected. There is no cross-process coordination and no zero-downtime guarantee for readers between the two renames; use a single build process or an external lock if you need that.
+
+During the build, plugins see `environment.config.build.outDir` pointing inside the staging directory, not the final publish path. Plugins that only emit files through the bundle don't need to care, but plugins that write to `outDir` directly or record absolute output paths should be aware that the files are moved to their final location only after the whole app build succeeds.
+
+If the build process crashes between the two renames, the next transactional build automatically recovers: a `<publishRoot>.vite-backup` without a publish root is moved back into place first. To recover manually, check the directory containing the publish root:
+
+- `<publishRoot>` missing and `<publishRoot>.vite-backup` present: rename the backup back to `<publishRoot>` to restore the last published tree.
+- Both present: the publish root is the newer complete tree; the backup can be removed.
+- Leftover `.vite-staging-*` directories are incomplete (or unpublished) builds and can be removed once no build is running.
+
 ## Environment Agnostic Code
 
 Most of the time, the current `environment` instance will be available as part of the context of the code being run so the need to access them through `server.environments` should be rare. For example, inside plugin hooks the environment is exposed as part of the `PluginContext`, so it can be accessed using `this.environment`. See [Environment API for Plugins](./api-environment-plugins.md) to learn about how to build environment aware plugins.

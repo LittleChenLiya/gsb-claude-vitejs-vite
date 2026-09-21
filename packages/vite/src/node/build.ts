@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import colors from 'picocolors'
 import type {
@@ -78,6 +79,7 @@ import {
   joinUrlSegments,
   mergeConfig,
   mergeWithDefaults,
+  normalizePath,
   partialEncodeURIPath,
   setupRollupOptionCompat,
   unique,
@@ -1805,6 +1807,276 @@ export interface BuilderOptions {
    */
   sharedPlugins?: boolean
   buildApp?: (builder: ViteBuilder) => Promise<void>
+  /**
+   * Publish the build output of every environment transactionally.
+   *
+   * When enabled, all environments must emit inside `publishRoot`. The
+   * build writes to a unique staging directory next to `publishRoot` and
+   * only replaces the published tree once every environment (including
+   * `closeBundle` and other finalization hooks) has succeeded. If any
+   * environment fails, the previously published tree is left untouched.
+   *
+   * @experimental
+   */
+  transactionalPublish?: TransactionalPublishOptions | undefined
+}
+
+export interface TransactionalPublishOptions {
+  /**
+   * Root directory that contains the output of every environment and is
+   * swapped atomically (per directory rename) once the whole app build
+   * succeeds. Resolved relative to the project root. It cannot be the
+   * project root itself or a filesystem root.
+   */
+  publishRoot: string
+}
+
+/**
+ * The stage a transactional publish failed in:
+ * - `validate`: the publish root or an environment output directory is invalid
+ * - `backup`: moving the previous publish tree to the backup location failed
+ * - `publish`: moving the staged tree into place failed (the previous tree
+ *   was restored)
+ * - `restore`: publishing failed and restoring the previous tree also
+ *   failed (both the backup and the staged tree are preserved on disk)
+ */
+export type TransactionalPublishPhase =
+  | 'validate'
+  | 'backup'
+  | 'publish'
+  | 'restore'
+
+export class TransactionalPublishError extends Error {
+  phase: TransactionalPublishPhase
+  publishRoot: string
+  stagingDir?: string
+  backupDir?: string
+
+  constructor(
+    phase: TransactionalPublishPhase,
+    message: string,
+    options: {
+      cause?: unknown
+      publishRoot: string
+      stagingDir?: string
+      backupDir?: string
+    },
+  ) {
+    super(`[transactional publish: ${phase}] ${message}`, {
+      cause: options.cause,
+    })
+    this.name = 'TransactionalPublishError'
+    this.phase = phase
+    this.publishRoot = options.publishRoot
+    this.stagingDir = options.stagingDir
+    this.backupDir = options.backupDir
+  }
+}
+
+interface TransactionalPublishPlan {
+  publishRoot: string
+  backupDir: string
+  environments: {
+    name: string
+    /** Directory name of the environment output relative to the publish root */
+    relativeOutDir: string
+  }[]
+}
+
+/**
+ * In-process mutual exclusion for transactional publishes. Builds in
+ * separate processes are not coordinated.
+ */
+const transactionalPublishLocks = new Set<string>()
+let transactionalPublishStagingCounter = 0
+
+function resolveTransactionalPublishPlan(
+  config: ResolvedConfig,
+  options: TransactionalPublishOptions,
+  environmentNames: string[],
+): TransactionalPublishPlan {
+  const fail = (message: string): never => {
+    throw new TransactionalPublishError('validate', message, {
+      publishRoot: options.publishRoot,
+    })
+  }
+  if (typeof options.publishRoot !== 'string' || !options.publishRoot) {
+    fail('builder.transactionalPublish.publishRoot must be a non-empty string.')
+  }
+  const publishRoot = path.resolve(config.root, options.publishRoot)
+  if (publishRoot === path.parse(publishRoot).root) {
+    fail(`The publish root cannot be a filesystem root, got "${publishRoot}".`)
+  }
+  if (publishRoot === path.resolve(config.root)) {
+    fail('The publish root cannot be the project root.')
+  }
+  const environments = environmentNames.map((name) => {
+    const environmentOptions = config.environments[name]
+    if (!environmentOptions) {
+      fail(`Environment "${name}" is not defined in the config.`)
+    }
+    const outDir = path.resolve(config.root, environmentOptions.build.outDir)
+    const relativeOutDir = path.relative(publishRoot, outDir)
+    if (
+      !relativeOutDir ||
+      relativeOutDir.startsWith('..') ||
+      path.isAbsolute(relativeOutDir)
+    ) {
+      fail(
+        `The output directory "${outDir}" of environment "${name}" must be ` +
+          `inside the publish root "${publishRoot}".`,
+      )
+    }
+    return { name, relativeOutDir }
+  })
+  for (let i = 0; i < environments.length; i++) {
+    for (let j = i + 1; j < environments.length; j++) {
+      const a = path.resolve(publishRoot, environments[i].relativeOutDir)
+      const b = path.resolve(publishRoot, environments[j].relativeOutDir)
+      const relative = path.relative(a, b)
+      if (
+        !relative ||
+        (!relative.startsWith('..') && !path.isAbsolute(relative))
+      ) {
+        fail(
+          `The output directories of environments "${environments[i].name}" and ` +
+            `"${environments[j].name}" must not overlap (${a} and ${b}).`,
+        )
+      }
+    }
+  }
+  return {
+    publishRoot,
+    backupDir: `${publishRoot}.vite-backup`,
+    environments,
+  }
+}
+
+function getTransactionalPublishStagingDir(publishRoot: string): string {
+  // A sibling of the publish root, so it is always on the same filesystem
+  // and can be renamed into place.
+  return path.join(
+    path.dirname(publishRoot),
+    `.vite-staging-${process.pid}-${Date.now().toString(36)}-${transactionalPublishStagingCounter++}`,
+  )
+}
+
+async function removeDir(dir: string): Promise<void> {
+  await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {})
+}
+
+async function commitTransactionalPublish(
+  plan: TransactionalPublishPlan,
+  stagingDir: string,
+  logger: Logger,
+): Promise<void> {
+  const { publishRoot, backupDir } = plan
+  // Recover from a previous build that was interrupted between the backup
+  // and publish steps: the backup holds the last complete published tree.
+  if (fs.existsSync(backupDir)) {
+    if (fs.existsSync(publishRoot)) {
+      // The current publish tree is newer than the stale backup.
+      await removeDir(backupDir)
+    } else {
+      await fs.promises.rename(backupDir, publishRoot)
+    }
+  }
+  const hadPreviousTree = fs.existsSync(publishRoot)
+  if (hadPreviousTree) {
+    try {
+      await fs.promises.rename(publishRoot, backupDir)
+    } catch (e) {
+      await removeDir(stagingDir)
+      throw new TransactionalPublishError(
+        'backup',
+        `Failed to move the previous publish tree "${publishRoot}" to the ` +
+          `backup location "${backupDir}". The previous tree is left in place.`,
+        { cause: e, publishRoot, stagingDir, backupDir },
+      )
+    }
+  }
+  try {
+    await fs.promises.rename(stagingDir, publishRoot)
+  } catch (publishError) {
+    if (hadPreviousTree) {
+      try {
+        await fs.promises.rename(backupDir, publishRoot)
+      } catch (restoreError) {
+        // Keep both the backup (last published tree) and the staging
+        // directory (new complete build) so the user can recover manually.
+        throw new TransactionalPublishError(
+          'restore',
+          `Failed to publish the new build to "${publishRoot}" and restoring ` +
+            `the previous tree also failed. The last published tree is preserved ` +
+            `at "${backupDir}" and the new build is preserved at "${stagingDir}". ` +
+            `Rename one of them to "${publishRoot}" to recover.`,
+          { cause: restoreError, publishRoot, stagingDir, backupDir },
+        )
+      }
+    }
+    await removeDir(stagingDir)
+    throw new TransactionalPublishError(
+      'publish',
+      `Failed to move the new build from "${stagingDir}" to "${publishRoot}". ` +
+        `The previous published tree has been restored.`,
+      { cause: publishError, publishRoot, stagingDir, backupDir },
+    )
+  }
+  if (hadPreviousTree) {
+    await fs.promises
+      .rm(backupDir, { recursive: true, force: true })
+      .catch((e) => {
+        logger.warn(
+          colors.yellow(
+            `\nFailed to remove the backup directory "${backupDir}": ${e?.message || e}\n`,
+          ),
+        )
+      })
+  }
+}
+
+async function runWithTransactionalPublish(
+  builder: ViteBuilder,
+  plan: TransactionalPublishPlan,
+  buildApp: () => Promise<void>,
+): Promise<void> {
+  const { publishRoot } = plan
+  const lockKey = normalizePath(publishRoot)
+  if (transactionalPublishLocks.has(lockKey)) {
+    throw new TransactionalPublishError(
+      'validate',
+      `Another build is already publishing to "${publishRoot}". Overlapping ` +
+        `transactional builds for the same publish root are not supported.`,
+      { publishRoot },
+    )
+  }
+  transactionalPublishLocks.add(lockKey)
+  const stagingDir = getTransactionalPublishStagingDir(publishRoot)
+  try {
+    // Redirect every environment to the staging tree. The staging tree
+    // mirrors the layout of the publish root, so relative links between
+    // environment outputs stay valid after the tree is moved into place.
+    for (const environmentPlan of plan.environments) {
+      const environment = builder.environments[environmentPlan.name]
+      if (environment) {
+        environment.config.build.outDir = path.join(
+          stagingDir,
+          environmentPlan.relativeOutDir,
+        )
+      }
+    }
+    try {
+      await buildApp()
+    } catch (e) {
+      // Only this build's staging directory is removed; the previously
+      // published tree is never touched on failure.
+      await removeDir(stagingDir)
+      throw e
+    }
+    await commitTransactionalPublish(plan, stagingDir, builder.config.logger)
+  } finally {
+    transactionalPublishLocks.delete(lockKey)
+  }
 }
 
 const _builderOptionsDefaults = Object.freeze({
@@ -1825,7 +2097,11 @@ export function resolveBuilderOptions(
   )
 }
 
-export type ResolvedBuilderOptions = Required<BuilderOptions>
+export type ResolvedBuilderOptions = Required<
+  Omit<BuilderOptions, 'transactionalPublish'>
+> & {
+  transactionalPublish?: TransactionalPublishOptions | undefined
+}
 
 /**
  * Creates a ViteBuilder to orchestrate building multiple environments.
@@ -1853,42 +2129,55 @@ export async function createBuilder(
 
   const environments: Record<string, BuildEnvironment> = {}
 
+  const buildApp = async () => {
+    const pluginContext = new BasicMinimalPluginContext(
+      { ...basePluginContextMeta, watchMode: false },
+      config.logger,
+    )
+
+    // order 'pre' and 'normal' hooks are run first, then config.builder.buildApp, then 'post' hooks
+    let configBuilderBuildAppCalled = false
+    for (const p of config.getSortedPlugins('buildApp')) {
+      const hook = p.buildApp
+      if (
+        !configBuilderBuildAppCalled &&
+        typeof hook === 'object' &&
+        hook.order === 'post'
+      ) {
+        configBuilderBuildAppCalled = true
+        await configBuilder.buildApp(builder)
+      }
+      const handler = getHookHandler(hook)
+      await handler.call(pluginContext, builder)
+    }
+    if (!configBuilderBuildAppCalled) {
+      await configBuilder.buildApp(builder)
+    }
+    // fallback to building all environments if no environments have been built
+    if (
+      Object.values(builder.environments).every(
+        (environment) => !environment.isBuilt,
+      )
+    ) {
+      for (const environment of Object.values(builder.environments)) {
+        await builder.build(environment)
+      }
+    }
+  }
+
   const builder: ViteBuilder = {
     environments,
     config,
     async buildApp() {
-      const pluginContext = new BasicMinimalPluginContext(
-        { ...basePluginContextMeta, watchMode: false },
-        config.logger,
-      )
-
-      // order 'pre' and 'normal' hooks are run first, then config.builder.buildApp, then 'post' hooks
-      let configBuilderBuildAppCalled = false
-      for (const p of config.getSortedPlugins('buildApp')) {
-        const hook = p.buildApp
-        if (
-          !configBuilderBuildAppCalled &&
-          typeof hook === 'object' &&
-          hook.order === 'post'
-        ) {
-          configBuilderBuildAppCalled = true
-          await configBuilder.buildApp(builder)
-        }
-        const handler = getHookHandler(hook)
-        await handler.call(pluginContext, builder)
-      }
-      if (!configBuilderBuildAppCalled) {
-        await configBuilder.buildApp(builder)
-      }
-      // fallback to building all environments if no environments have been built
-      if (
-        Object.values(builder.environments).every(
-          (environment) => !environment.isBuilt,
+      if (configBuilder.transactionalPublish) {
+        const plan = resolveTransactionalPublishPlan(
+          config,
+          configBuilder.transactionalPublish,
+          Object.keys(environments),
         )
-      ) {
-        for (const environment of Object.values(builder.environments)) {
-          await builder.build(environment)
-        }
+        await runWithTransactionalPublish(builder, plan, buildApp)
+      } else {
+        await buildApp()
       }
     },
     async build(

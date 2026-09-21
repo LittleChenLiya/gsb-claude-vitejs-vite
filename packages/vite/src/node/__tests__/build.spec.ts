@@ -1,5 +1,7 @@
+import fs from 'node:fs'
 import fsp from 'node:fs/promises'
-import { basename, resolve } from 'node:path'
+import os from 'node:os'
+import path, { basename, resolve } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
 import colors from 'picocolors'
 import type {
@@ -13,9 +15,11 @@ import type {
 } from 'rolldown'
 import { afterEach, describe, expect, assert, test, vi } from 'vitest'
 import { BuildEnvironment, normalizePath, resolveConfig } from '..'
+import type { InlineConfig } from '..'
 import type { LibraryFormats, LibraryOptions } from '../build'
 import {
   ChunkMetadataMap,
+  TransactionalPublishError,
   build,
   createBuilder,
   onRollupLog,
@@ -1639,3 +1643,359 @@ function getOutputHashChanges(
     unchanged: names.filter((name) => map1[name] === map2[name]),
   }
 }
+
+describe('transactional publish', () => {
+  const tempRoots: string[] = []
+
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    await Promise.all(
+      tempRoots
+        .splice(0)
+        .map((dir) => fsp.rm(dir, { recursive: true, force: true })),
+    )
+  })
+
+  async function createTempProject(ssrVersion = 'v1'): Promise<string> {
+    const root = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'vite-transactional-publish-'),
+    )
+    tempRoots.push(root)
+    await fsp.mkdir(path.join(root, 'src'), { recursive: true })
+    // the client output references the ssr output through the final
+    // relative layout of the publish root
+    await fsp.writeFile(
+      path.join(root, 'src/client.js'),
+      "console.log('../ssr/server.js')",
+    )
+    await writeSsrEntry(root, ssrVersion)
+    return root
+  }
+
+  async function writeSsrEntry(root: string, version: string): Promise<void> {
+    await fsp.writeFile(
+      path.join(root, 'src/server.js'),
+      `export function render() { return '${version}' }`,
+    )
+  }
+
+  function baseConfig(
+    root: string,
+    overrides: {
+      publishRoot?: string
+      clientOutDir?: string
+      ssrOutDir?: string
+      plugins?: InlineConfig['plugins']
+    } = {},
+  ): InlineConfig {
+    return {
+      root,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: overrides.plugins,
+      environments: {
+        client: {
+          build: {
+            outDir: overrides.clientOutDir ?? 'dist/client',
+            manifest: true,
+            rolldownOptions: {
+              input: path.join(root, 'src/client.js'),
+            },
+          },
+        },
+        ssr: {
+          build: {
+            outDir: overrides.ssrOutDir ?? 'dist/ssr',
+            ssr: true,
+            rolldownOptions: {
+              input: path.join(root, 'src/server.js'),
+              output: { entryFileNames: '[name].js' },
+            },
+          },
+        },
+      },
+      builder: {
+        transactionalPublish: {
+          publishRoot: overrides.publishRoot ?? 'dist',
+        },
+      },
+    }
+  }
+
+  async function listSiblings(root: string): Promise<string[]> {
+    return (await fsp.readdir(root)).filter(
+      (name) =>
+        name.startsWith('.vite-staging-') || name.endsWith('.vite-backup'),
+    )
+  }
+
+  async function readAllFiles(
+    dir: string,
+  ): Promise<{ path: string; content: string }[]> {
+    const files: { path: string; content: string }[] = []
+    async function walk(current: string): Promise<void> {
+      for (const entry of await fsp.readdir(current, { withFileTypes: true })) {
+        const full = path.join(current, entry.name)
+        if (entry.isDirectory()) {
+          await walk(full)
+        } else {
+          files.push({ path: full, content: await fsp.readFile(full, 'utf8') })
+        }
+      }
+    }
+    await walk(dir)
+    return files
+  }
+  test('publishes client and ssr outputs only after every environment succeeds', async () => {
+    const root = await createTempProject()
+    const outDirsSeenByPlugins: Record<string, string> = {}
+    const builder = await createBuilder(
+      baseConfig(root, {
+        plugins: [
+          {
+            name: 'capture-out-dir',
+            buildStart() {
+              outDirsSeenByPlugins[this.environment.name] =
+                this.environment.config.build.outDir
+            },
+          },
+        ],
+      }),
+    )
+    await builder.buildApp()
+
+    const dist = path.join(root, 'dist')
+    // the ssr output is published at its final location
+    const ssrEntry = path.join(dist, 'ssr/server.js')
+    expect(fs.existsSync(ssrEntry)).toBe(true)
+    // the client output references the ssr output and the link resolves
+    // against the final publish tree
+    const clientFiles = await readAllFiles(path.join(dist, 'client'))
+    const clientEntry = clientFiles.find((file) => file.path.endsWith('.js'))!
+    expect(clientEntry.content).toContain('../ssr/server.js')
+    expect(
+      fs.existsSync(path.resolve(dist, 'client', '../ssr/server.js')),
+    ).toBe(true)
+    // the manifest is published and no output references the staging tree
+    const manifest = JSON.parse(
+      await fsp.readFile(path.join(dist, 'client/.vite/manifest.json'), 'utf8'),
+    )
+    expect(Object.keys(manifest)).toContain('src/client.js')
+    for (const file of await readAllFiles(dist)) {
+      expect(file.content).not.toContain('.vite-staging-')
+    }
+    // plugins see the staging paths during the build, not the final paths
+    expect(outDirsSeenByPlugins.client).toContain('.vite-staging-')
+    expect(outDirsSeenByPlugins.ssr).toContain('.vite-staging-')
+    // no staging or backup directories are left behind
+    expect(await listSiblings(root)).toEqual([])
+
+    // a second build replaces the published tree
+    await writeSsrEntry(root, 'v2')
+    const builder2 = await createBuilder(baseConfig(root))
+    await builder2.buildApp()
+    expect(await fsp.readFile(ssrEntry, 'utf8')).toContain('v2')
+    expect(await listSiblings(root)).toEqual([])
+  })
+
+  test('keeps the previous publish tree when an environment fails to compile', async () => {
+    const root = await createTempProject()
+    await (await createBuilder(baseConfig(root))).buildApp()
+    const dist = path.join(root, 'dist')
+    const marker = path.join(dist, 'client/old.txt')
+    await fsp.writeFile(marker, 'keep me')
+    const oldSsrEntry = await fsp.readFile(
+      path.join(dist, 'ssr/server.js'),
+      'utf8',
+    )
+
+    // break the second environment
+    await fsp.writeFile(path.join(root, 'src/server.js'), 'export {')
+    const builder = await createBuilder(baseConfig(root))
+    await expect(builder.buildApp()).rejects.toThrow()
+
+    // the old publish tree is fully intact and no staging content remains
+    expect(await fsp.readFile(marker, 'utf8')).toBe('keep me')
+    expect(await fsp.readFile(path.join(dist, 'ssr/server.js'), 'utf8')).toBe(
+      oldSsrEntry,
+    )
+    expect(await listSiblings(root)).toEqual([])
+  })
+
+  test('keeps the previous publish tree when a closeBundle hook fails', async () => {
+    const root = await createTempProject()
+    await (await createBuilder(baseConfig(root))).buildApp()
+    const dist = path.join(root, 'dist')
+    const marker = path.join(dist, 'client/old.txt')
+    await fsp.writeFile(marker, 'keep me')
+
+    const builder = await createBuilder(
+      baseConfig(root, {
+        plugins: [
+          {
+            name: 'fail-close-bundle',
+            closeBundle() {
+              if (this.environment.name === 'ssr') {
+                throw new Error('closeBundle failed')
+              }
+            },
+          },
+        ],
+      }),
+    )
+    await expect(builder.buildApp()).rejects.toThrow('closeBundle failed')
+
+    expect(await fsp.readFile(marker, 'utf8')).toBe('keep me')
+    expect(fs.existsSync(path.join(dist, 'ssr/server.js'))).toBe(true)
+    expect(await listSiblings(root)).toEqual([])
+  })
+  test('restores the previous tree when the final rename fails', async () => {
+    const root = await createTempProject()
+    await (await createBuilder(baseConfig(root))).buildApp()
+    const dist = path.join(root, 'dist')
+    const marker = path.join(dist, 'client/old.txt')
+    await fsp.writeFile(marker, 'keep me')
+    await writeSsrEntry(root, 'v2')
+
+    const originalRename = fs.promises.rename
+    vi.spyOn(fs.promises, 'rename').mockImplementation(
+      async (src: any, dest: any) => {
+        if (String(src).includes('.vite-staging-')) {
+          throw new Error('rename failed')
+        }
+        return originalRename.call(fs.promises, src, dest)
+      },
+    )
+
+    const builder = await createBuilder(baseConfig(root))
+    const error = await builder.buildApp().catch((e) => e)
+    expect(error).toBeInstanceOf(TransactionalPublishError)
+    expect(error.phase).toBe('publish')
+
+    // the old tree was restored and no half-new output is served
+    expect(await fsp.readFile(marker, 'utf8')).toBe('keep me')
+    expect(
+      await fsp.readFile(path.join(dist, 'ssr/server.js'), 'utf8'),
+    ).toContain('v1')
+    expect(await listSiblings(root)).toEqual([])
+  })
+
+  test('preserves the backup when restore fails and recovers on the next build', async () => {
+    const root = await createTempProject()
+    await (await createBuilder(baseConfig(root))).buildApp()
+    const dist = path.join(root, 'dist')
+    const backupDir = `${dist}.vite-backup`
+    await writeSsrEntry(root, 'v2')
+
+    const originalRename = fs.promises.rename
+    vi.spyOn(fs.promises, 'rename').mockImplementation(
+      async (src: any, dest: any) => {
+        if (
+          String(src).includes('.vite-staging-') ||
+          String(src).endsWith('.vite-backup')
+        ) {
+          throw new Error('rename failed')
+        }
+        return originalRename.call(fs.promises, src, dest)
+      },
+    )
+
+    const builder = await createBuilder(baseConfig(root))
+    const error = await builder.buildApp().catch((e) => e)
+    expect(error).toBeInstanceOf(TransactionalPublishError)
+    expect(error.phase).toBe('restore')
+    expect(error.message).toContain('restore')
+
+    // the publish root is missing, but both the last published tree (backup)
+    // and the complete new build (staging) are preserved for manual recovery
+    expect(fs.existsSync(dist)).toBe(false)
+    expect(
+      await fsp.readFile(path.join(backupDir, 'ssr/server.js'), 'utf8'),
+    ).toContain('v1')
+    const stagingDirs = (await fsp.readdir(root)).filter((name) =>
+      name.startsWith('.vite-staging-'),
+    )
+    expect(stagingDirs).toHaveLength(1)
+    expect(
+      await fsp.readFile(
+        path.join(root, stagingDirs[0], 'ssr/server.js'),
+        'utf8',
+      ),
+    ).toContain('v2')
+
+    // the next build recovers the backup and publishes successfully
+    vi.restoreAllMocks()
+    const builder2 = await createBuilder(baseConfig(root))
+    await builder2.buildApp()
+    expect(
+      await fsp.readFile(path.join(dist, 'ssr/server.js'), 'utf8'),
+    ).toContain('v2')
+    // the staging directory of the interrupted build is preserved until it
+    // is removed manually
+    expect(await listSiblings(root)).toEqual(stagingDirs)
+    await fsp.rm(path.join(root, stagingDirs[0]), { recursive: true })
+    expect(await listSiblings(root)).toEqual([])
+  })
+
+  test('rejects invalid publish roots and output directories', async () => {
+    const root = await createTempProject()
+    const expectInvalid = async (
+      overrides: Parameters<typeof baseConfig>[1],
+      pattern: RegExp,
+    ) => {
+      const builder = await createBuilder(baseConfig(root, overrides))
+      await expect(builder.buildApp()).rejects.toThrow(pattern)
+    }
+
+    await expectInvalid({ publishRoot: '.' }, /project root/)
+    await expectInvalid(
+      { publishRoot: path.parse(root).root },
+      /filesystem root/,
+    )
+    await expectInvalid(
+      { clientOutDir: 'elsewhere/client' },
+      /inside the publish root/,
+    )
+    await expectInvalid({ clientOutDir: 'dist' }, /inside the publish root/)
+    await expectInvalid(
+      { clientOutDir: 'dist/app', ssrOutDir: 'dist/app/ssr' },
+      /must not overlap/,
+    )
+    expect(await listSiblings(root)).toEqual([])
+  })
+
+  test('rejects overlapping builds for the same publish root', async () => {
+    const root = await createTempProject()
+    let entered!: () => void
+    let release!: () => void
+    const enteredPromise = new Promise<void>((r) => (entered = r))
+    const gate = new Promise<void>((r) => (release = r))
+    const builder1 = await createBuilder(
+      baseConfig(root, {
+        plugins: [
+          {
+            name: 'gate',
+            async buildStart() {
+              entered()
+              await gate
+            },
+          },
+        ],
+      }),
+    )
+    const builder2 = await createBuilder(baseConfig(root))
+
+    const first = builder1.buildApp()
+    await enteredPromise
+    await expect(builder2.buildApp()).rejects.toThrow(
+      /Overlapping transactional builds/,
+    )
+    release()
+    await first
+
+    // once the first build finishes, the publish root can be built again
+    await builder2.buildApp()
+    expect(fs.existsSync(path.join(root, 'dist/ssr/server.js'))).toBe(true)
+    expect(await listSiblings(root)).toEqual([])
+  })
+})

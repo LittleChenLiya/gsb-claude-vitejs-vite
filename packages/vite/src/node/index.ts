@@ -36,7 +36,7 @@ export { perEnvironmentPlugin } from './plugin'
 export { perEnvironmentState } from './environment'
 export { createServer } from './server'
 export { preview } from './preview'
-export { build, createBuilder } from './build'
+export { build, createBuilder, TransactionalPublishError } from './build'
 
 export { optimizeDeps } from './optimizer'
 export { createIdResolver } from './idResolver'
@@ -152,6 +152,8 @@ export type {
   ViteBuilder,
   BuildAppHook,
   BuilderOptions,
+  TransactionalPublishOptions,
+  TransactionalPublishPhase,
   BuildOptions,
   BuildEnvironmentOptions,
   LibraryOptions,
