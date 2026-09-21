@@ -256,6 +256,22 @@ export interface DevEnvironmentOptions {
    * This option can also be used instead of the removed config.experimental.skipSsrTransform.
    */
   moduleRunnerTransform?: boolean
+
+  /**
+   * Memory budget in bytes for the transform results cache of this
+   * environment during dev. Each completed transform result is accounted by
+   * the UTF-8 byte length of its code plus its serialized source map, and
+   * the least recently used results are evicted once the total exceeds the
+   * budget. A result that alone exceeds the budget is served to the current
+   * request but not cached. Zero disables caching of completed results.
+   * When unset, the cache is unbounded (previous behavior).
+   *
+   * Note that the accounted bytes are a reproducible estimate of the cached
+   * content, not a measurement of the process heap usage.
+   *
+   * @default undefined
+   */
+  transformCacheBudget?: number
 }
 
 function defaultCreateClientDevEnvironment(
@@ -276,12 +292,13 @@ function defaultCreateDevEnvironment(name: string, config: ResolvedConfig) {
 
 export type ResolvedDevEnvironmentOptions = Omit<
   Required<DevEnvironmentOptions>,
-  'sourcemapIgnoreList'
+  'sourcemapIgnoreList' | 'transformCacheBudget'
 > & {
   sourcemapIgnoreList: Exclude<
     DevEnvironmentOptions['sourcemapIgnoreList'],
     false | undefined
   >
+  transformCacheBudget?: number
 }
 
 type AllResolveOptions = ResolveOptions & {
@@ -861,6 +878,7 @@ const configDefaults = Object.freeze({
     // createEnvironment
     // recoverable
     // moduleRunnerTransform
+    // transformCacheBudget
   },
   build: buildEnvironmentOptionsDefaults,
   resolve: {

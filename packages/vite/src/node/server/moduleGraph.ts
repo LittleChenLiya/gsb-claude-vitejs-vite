@@ -9,6 +9,7 @@ import {
   removeImportQuery,
   removeTimestampQuery,
 } from '../utils'
+import type { TransformCacheBudget } from './transformCache'
 import type { TransformResult } from './transformRequest'
 
 export class EnvironmentModuleNode {
@@ -112,6 +113,12 @@ export class EnvironmentModuleGraph {
   /** @internal */
   _hasResolveFailedErrorModules: Set<EnvironmentModuleNode> = new Set()
 
+  /**
+   * Tracks the transform cache budget for this environment.
+   * @internal
+   */
+  _transformCache: TransformCacheBudget | undefined
+
   constructor(
     environment: string,
     resolveId: (url: string) => Promise<PartialResolvedId | null>,
@@ -205,6 +212,7 @@ export class EnvironmentModuleGraph {
     const etag = mod.transformResult?.etag
     if (etag) this.etagToModuleMap.delete(etag)
 
+    this._transformCache?.delete(mod)
     mod.transformResult = null
 
     mod.ssrModule = null
@@ -431,6 +439,15 @@ export class EnvironmentModuleGraph {
     mod: EnvironmentModuleNode,
     result: TransformResult | null,
   ): void {
+    const transformCache = this._transformCache
+    if (transformCache?.enabled) {
+      transformCache.delete(mod)
+      // The result is only kept if it fits the budget. Oversized results
+      // are still returned to the current request, but not cached.
+      if (!result || !transformCache.write(mod, result)) {
+        result = null
+      }
+    }
     if (this.environment === 'client') {
       const prevEtag = mod.transformResult?.etag
       if (prevEtag) this.etagToModuleMap.delete(prevEtag)
@@ -438,6 +455,21 @@ export class EnvironmentModuleGraph {
     }
 
     mod.transformResult = result
+  }
+
+  /**
+   * Remove a cached transform result evicted by the transform cache budget,
+   * so stale etags cannot match conditional requests and the module is
+   * re-transformed on the next request. The module graph node and its
+   * dependency edges are kept intact.
+   * @internal
+   */
+  _evictCachedTransformResult(mod: EnvironmentModuleNode): void {
+    if (this.environment === 'client') {
+      const etag = mod.transformResult?.etag
+      if (etag) this.etagToModuleMap.delete(etag)
+    }
+    mod.transformResult = null
   }
 
   getModuleByEtag(etag: string): EnvironmentModuleNode | undefined {

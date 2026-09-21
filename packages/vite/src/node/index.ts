@@ -232,6 +232,7 @@ export type {
   TransformOptions,
   TransformResult,
 } from './server/transformRequest'
+export type { TransformCacheStats } from './server/transformCache'
 export type {
   HmrOptions,
   WsOptions,

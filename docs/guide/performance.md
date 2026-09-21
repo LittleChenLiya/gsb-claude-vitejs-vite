@@ -108,6 +108,45 @@ Note that you should only warm up files that are frequently used to not overload
 
 Using [`--open` or `server.open`](/config/server-options.html#server-open) also provides a performance boost, as Vite will automatically warm up the entry point of your app or the provided URL to open.
 
+## Limit the Transform Cache Memory
+
+In large projects, the transform results cached by the dev server can grow unbounded over a long session. You can set a per-environment memory budget with `dev.transformCacheBudget`. Completed transform results are accounted by the UTF-8 byte length of their code plus their serialized source map, and the least recently used results are evicted once the total exceeds the budget. Evicted modules are simply re-transformed on the next request.
+
+```js [vite.config.js]
+export default defineConfig({
+  // applies to all environments
+  dev: {
+    transformCacheBudget: 100 * 1024 * 1024, // 100 MB
+  },
+  // or configured per environment
+  environments: {
+    client: {
+      dev: {
+        transformCacheBudget: 100 * 1024 * 1024,
+      },
+    },
+    ssr: {
+      dev: {
+        transformCacheBudget: 50 * 1024 * 1024,
+      },
+    },
+  },
+})
+```
+
+A result that alone exceeds the budget is still served to the current request but is not kept in the cache. Setting the budget to `0` disables caching of completed results (concurrent requests for the same module still share a single transform). When the option is not set, the cache is unbounded as before.
+
+You can inspect the cache usage of each environment at runtime. The stats only expose the number of cached entries, the accounted bytes and the number of evictions:
+
+```js
+const server = await createServer()
+// ...
+console.log(server.environments.client.transformCacheStats)
+// { entries: 512, bytes: 2034902, evictions: 37 }
+```
+
+Note that the accounted bytes are a reproducible estimate of the cached content (UTF-8 encoded code plus serialized source maps), not a measurement of the process heap usage.
+
 ## Use Lesser or Native Tooling
 
 Keeping Vite fast with a growing codebase is about reducing the amount of work for the source files (JS/TS/CSS).

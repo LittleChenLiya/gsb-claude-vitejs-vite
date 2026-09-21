@@ -230,6 +230,8 @@ async function getCachedTransformResult(
   const cached = module.transformResult
   if (cached) {
     debugCache?.(`[memory] ${prettyUrl}`)
+    // record the cache hit so the entry becomes most recently used
+    environment.moduleGraph._transformCache?.read(module)
     return cached
   }
 }

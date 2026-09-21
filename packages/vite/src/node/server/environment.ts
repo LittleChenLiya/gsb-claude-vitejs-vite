@@ -34,6 +34,8 @@ import {
   ERR_CLOSED_SERVER,
   createEnvironmentPluginContainer,
 } from './pluginContainer'
+import { TransformCacheBudget } from './transformCache'
+import type { TransformCacheStats } from './transformCache'
 import type { TransformResult } from './transformRequest'
 import { transformRequest } from './transformRequest'
 import { warmupFiles } from './warmup'
@@ -100,6 +102,11 @@ export class DevEnvironment extends BaseEnvironment {
   _crawlEndFinder: CrawlEndFinder
 
   /**
+   * @internal
+   */
+  _transformCache: TransformCacheBudget
+
+  /**
    * Hot channel for this environment. If not provided or disabled,
    * it will be a noop channel that does nothing.
    *
@@ -139,6 +146,12 @@ export class DevEnvironment extends BaseEnvironment {
     this.moduleGraph = new EnvironmentModuleGraph(name, (url: string) =>
       this.pluginContainer!.resolveId(url, undefined),
     )
+
+    this._transformCache = new TransformCacheBudget(
+      options.dev.transformCacheBudget,
+      (mod) => this.moduleGraph._evictCachedTransformResult(mod),
+    )
+    this.moduleGraph._transformCache = this._transformCache
 
     this._crawlEndFinder = setupOnCrawlEnd()
 
@@ -301,6 +314,18 @@ export class DevEnvironment extends BaseEnvironment {
     return transformRequest(this, url, { skipFsCheck: this._skipFsCheck })
   }
 
+  /**
+   * Read-only stats of the transform results cache for this environment,
+   * when `dev.transformCacheBudget` is configured. It only exposes the
+   * number of cached entries, the accounted bytes and the eviction count.
+   * The accounted bytes are a reproducible estimate of the cached content
+   * (UTF-8 encoded code plus serialized source maps), not a measurement of
+   * the process heap usage.
+   */
+  get transformCacheStats(): Readonly<TransformCacheStats> {
+    return this._transformCache.stats
+  }
+
   async warmupRequest(url: string): Promise<void> {
     if (this.bundledDev) {
       // no-op
@@ -385,6 +410,7 @@ export class DevEnvironment extends BaseEnvironment {
         }
       })(),
     ])
+    this._transformCache.clear()
   }
 
   /**
