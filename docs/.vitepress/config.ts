@@ -426,6 +426,10 @@ const config = defineConfig({
               text: 'Worker Options',
               link: '/config/worker-options',
             },
+            {
+              text: 'Config Attribution',
+              link: '/config/config-attribution',
+            },
           ],
         },
       ],

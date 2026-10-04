@@ -127,6 +127,14 @@ export type {
   ResolvedDevEnvironmentOptions,
   ResolvedDevToolsConfig,
 } from './config'
+export type {
+  ConfigAttributionChange,
+  ConfigAttributionChangeKind,
+  ConfigAttributionHookRecord,
+  ConfigAttributionOptions,
+  ConfigAttributionReport,
+  ConfigValueSummary,
+} from './configAttribution'
 export type { HtmlAssetSource } from './assetSource'
 export type {
   Plugin,

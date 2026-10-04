@@ -51,6 +51,12 @@ import {
   resolveBuildEnvironmentOptions,
   resolveBuilderOptions,
 } from './build'
+import type {
+  ConfigAttributionOptions,
+  ConfigAttributionReport,
+  ConfigAttributionTracker,
+} from './configAttribution'
+import { createConfigAttributionTracker } from './configAttribution'
 import {
   CLIENT_ENTRY,
   DEFAULT_ASSETS_RE,
@@ -684,6 +690,15 @@ export interface InlineConfig extends UserConfig {
   /** @deprecated */
   envFile?: false
   forceOptimizeDeps?: boolean
+  /**
+   * Opt-in diagnostic that attributes the final values of the given config
+   * paths to the plugin `config` hooks that changed them. Hooks are still run
+   * exactly once, in the existing order, with the existing `mergeConfig`
+   * behavior; immutable before/after snapshots are taken around each hook
+   * only. When enabled, the resulting {@link ConfigAttributionReport} is
+   * exposed on the resolved config as `configAttributionReport`.
+   */
+  configAttribution?: boolean | ConfigAttributionOptions
 }
 
 export interface ResolvedConfig extends Readonly<
@@ -707,6 +722,11 @@ export interface ResolvedConfig extends Readonly<
     configFile: string | undefined
     configFileDependencies: string[]
     inlineConfig: InlineConfig
+    /**
+     * Present only when `inlineConfig.configAttribution` was enabled.
+     * Reports which plugin `config` hook last changed each watched path.
+     */
+    configAttributionReport?: ConfigAttributionReport
     root: string
     base: string
     /** @internal */
@@ -1591,7 +1611,27 @@ export async function resolveConfig(
 
   // run config hooks
   const userPlugins = [...prePlugins, ...normalPlugins, ...postPlugins]
-  config = await runConfigHook(config, userPlugins, configEnv)
+  const configAttribution = createConfigAttributionTracker(
+    config.configAttribution,
+  )
+  try {
+    config = await runConfigHook(
+      config,
+      userPlugins,
+      configEnv,
+      configAttribution,
+    )
+  } catch (err) {
+    // A failed hook still leaves a complete report for every hook that
+    // finished earlier; surface it on the error before re-throwing.
+    if (configAttribution) {
+      ;(
+        err as { configAttributionReport?: ConfigAttributionReport }
+      ).configAttributionReport = configAttribution.getReport()
+    }
+    throw err
+  }
+  const configAttributionReport = configAttribution?.getReport()
   const devtoolsConfigChanged = !isDeepStrictEqual(
     config.devtools,
     devtoolsOptions,
@@ -2084,6 +2124,7 @@ export async function resolveConfig(
       normalizePath(path.resolve(name)),
     ),
     inlineConfig,
+    ...(configAttributionReport ? { configAttributionReport } : {}),
     root: resolvedRoot,
     tsconfig: config.tsconfig
       ? normalizePath(path.resolve(resolvedRoot, config.tsconfig))
@@ -2850,6 +2891,7 @@ async function runConfigHook(
   config: InlineConfig,
   plugins: Plugin[],
   configEnv: ConfigEnv,
+  attribution: ConfigAttributionTracker | null = null,
 ): Promise<InlineConfig> {
   let conf = config
 
@@ -2864,7 +2906,17 @@ async function runConfigHook(
   for (const p of getSortedPluginsByHook('config', plugins)) {
     const hook = p.config
     const handler = getHookHandler(hook)
-    const res = await handler.call(context, conf, configEnv)
+    // Immutable before/after snapshots of the watched paths. The diagnostic
+    // does not cause hooks to run again: snapshots are taken around the one
+    // regular invocation below.
+    const before = attribution?.snapshot(conf)
+    let res: any
+    try {
+      res = await handler.call(context, conf, configEnv)
+    } catch (err) {
+      attribution?.recordHookError(p.name, err)
+      throw err
+    }
     if (res && res !== conf) {
       if (hasBothRollupOptionsAndRolldownOptions(res)) {
         context.warn(
@@ -2885,6 +2937,11 @@ async function runConfigHook(
         )
       }
       conf = mergeConfig(conf, res)
+    }
+    if (attribution && before) {
+      // Snapshot after merge/in-place mutation and diff against the frozen
+      // pre-hook snapshot, so hooks mutating `conf` directly are detected.
+      attribution.recordHook(p.name, before, attribution.snapshot(conf))
     }
   }
 
