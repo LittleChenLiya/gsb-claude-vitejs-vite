@@ -330,6 +330,10 @@ const config = defineConfig({
               link: '/guide/troubleshooting',
             },
             {
+              text: 'Config Hook Attribution',
+              link: '/guide/config-attribution',
+            },
+            {
               text: 'Performance',
               link: '/guide/performance',
             },

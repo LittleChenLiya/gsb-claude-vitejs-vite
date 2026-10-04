@@ -52,6 +52,10 @@ import {
   resolveBuilderOptions,
 } from './build'
 import {
+  ConfigAttributionSession,
+  isConfigAttributionEnabled,
+} from './configAttribution'
+import {
   CLIENT_ENTRY,
   DEFAULT_ASSETS_RE,
   DEFAULT_CLIENT_CONDITIONS,
@@ -2861,10 +2865,25 @@ async function runConfigHook(
     Omit<PluginContextMeta, 'watchMode'>
   >(basePluginContextMeta, tempLogger)
 
+  // Config hook attribution diagnostics (opt-in via DEBUG=vite:config-attribution).
+  // The session is purely observational: it snapshots the config before and
+  // after each hook without ever re-running hooks or executing values.
+  const attribution = isConfigAttributionEnabled()
+    ? new ConfigAttributionSession()
+    : undefined
+
   for (const p of getSortedPluginsByHook('config', plugins)) {
     const hook = p.config
     const handler = getHookHandler(hook)
-    const res = await handler.call(context, conf, configEnv)
+    const before = attribution?.snapshot(conf)
+    let res: any
+    try {
+      res = await handler.call(context, conf, configEnv)
+    } catch (e) {
+      // Keep the last completed attribution record even when a hook fails.
+      attribution?.recordFailure(p.name, e)
+      throw e
+    }
     if (res && res !== conf) {
       if (hasBothRollupOptionsAndRolldownOptions(res)) {
         context.warn(
@@ -2886,7 +2905,12 @@ async function runConfigHook(
       }
       conf = mergeConfig(conf, res)
     }
+    if (attribution) {
+      attribution.record(p.name, before!, attribution.snapshot(conf))
+    }
   }
+
+  attribution?.flush()
 
   return conf
 }
