@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Virtual Module Registrar</title>
+  </head>
+  <body>
+    <h1>Virtual Module Registrar</h1>
+    <div id="env"></div>
+    <script type="module">
+      import { env } from 'virtual:env?foo=bar&baz=qux'
+      document.getElementById('env').textContent = JSON.stringify(env, null, 2)
+    </script>
+  </body>
+</html>

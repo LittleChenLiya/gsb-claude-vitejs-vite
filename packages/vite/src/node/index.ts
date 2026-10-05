@@ -40,6 +40,21 @@ export { build, createBuilder } from './build'
 
 export { optimizeDeps } from './optimizer'
 export { createIdResolver } from './idResolver'
+export {
+  createVirtualModuleRegistrar,
+  decodeVirtualModuleId,
+  encodeVirtualModuleId,
+  parseVirtualModuleSource,
+  VIRTUAL_MODULE_ID_PREFIX,
+} from './virtualModule'
+export type {
+  VirtualModuleIdParts,
+  VirtualModuleLoadFn,
+  VirtualModuleLoadResult,
+  VirtualModuleQuery,
+  VirtualModuleQueryEntry,
+  VirtualModuleRegistrar,
+} from './virtualModule'
 
 export { formatPostcssSourceMap, preprocessCSS } from './plugins/css'
 export { transformWithEsbuild } from './plugins/esbuild'
