@@ -74,6 +74,8 @@ import {
 } from '../watch'
 import type { ServerWatchOptions } from '../watch'
 import type { DevEnvironment } from './environment'
+import { createHeaderStrategy } from './headerStrategy'
+import type { HeaderStrategy } from './headerStrategy'
 import type { HmrOptions, NormalizedHotChannel, WsOptions } from './hmr'
 import { handleHMRUpdate, updateModules } from './hmr'
 import { baseMiddleware } from './middlewares/base'
@@ -333,6 +335,12 @@ export interface ViteDevServer {
    */
   middlewares: Connect.Server
   /**
+   * Explicit response header strategy layer. Headers are registered per
+   * category (static / transform / error) and resolved by declaration
+   * priority so the final value does not depend on middleware write order.
+   */
+  headerStrategy: HeaderStrategy
+  /**
    * native Node http server instance
    * will be null in middleware mode
    */
@@ -545,6 +553,41 @@ export async function _createServer(
   const httpsOptions = await resolveHttpsConfig(config.server.https)
   const { middlewareMode } = serverConfig
 
+  // Header strategy layer -----------------------------------------------------
+  // Explicit per-category header registration with priority-based conflict
+  // resolution. Headers are registered for static / transform / error
+  // responses and resolved by declaration priority so the final value does
+  // not depend on middleware write order.
+  const headerStrategy = createHeaderStrategy()
+  // Category cache headers (strategy priority). These are the per-category
+  // defaults; per-request values (e.g. immutable deps) are passed as runtime
+  // headers from the middleware.
+  headerStrategy.register(
+    'static',
+    { 'Cache-Control': 'no-cache' },
+    'strategy',
+    'strategy:static',
+  )
+  headerStrategy.register(
+    'error',
+    { 'Cache-Control': 'no-cache' },
+    'strategy',
+    'strategy:error',
+  )
+  // Business headers (server.headers) are registered globally at business
+  // priority. They can set custom headers but cannot override builtin
+  // (Content-Length) or strategy (category cache) headers.
+  if (serverConfig.headers) {
+    headerStrategy.register(
+      'global',
+      serverConfig.headers,
+      'business',
+      'business:server.headers',
+    )
+  }
+  // Validate same-priority conflicts at startup (before the server listens).
+  headerStrategy.freeze()
+
   const resolvedOutDirs = getResolvedOutDirs(
     config.root,
     config.build.outDir,
@@ -667,6 +710,7 @@ export async function _createServer(
   let server: ViteDevServer = {
     config,
     middlewares,
+    headerStrategy,
     httpServer,
     watcher,
     ws,
@@ -1024,7 +1068,7 @@ export async function _createServer(
 
   // base
   if (config.base !== '/') {
-    middlewares.use(baseMiddleware(config.rawBase, !!middlewareMode))
+    middlewares.use(baseMiddleware(config.rawBase, !!middlewareMode, server))
   }
 
   // open in editor support
@@ -1081,7 +1125,7 @@ export async function _createServer(
     middlewares.use(indexHtmlMiddleware(root, server))
 
     // handle 404s
-    middlewares.use(notFoundMiddleware())
+    middlewares.use(notFoundMiddleware(server))
   }
 
   // error handler

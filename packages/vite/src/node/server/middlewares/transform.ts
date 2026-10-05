@@ -179,6 +179,7 @@ export function transformMiddleware(
 
             return send(req, res, JSON.stringify(map), 'json', {
               headers: server.config.server.headers,
+              strategy: server.headerStrategy,
             })
           } catch {
             // Outdated source map request for optimized deps, this isn't an error
@@ -195,6 +196,7 @@ export function transformMiddleware(
             return send(req, res, JSON.stringify(dummySourceMap), 'json', {
               cacheControl: 'no-cache',
               headers: server.config.server.headers,
+              strategy: server.headerStrategy,
             })
           }
         } else {
@@ -205,6 +207,7 @@ export function transformMiddleware(
           if (map) {
             return send(req, res, JSON.stringify(map), 'json', {
               headers: server.config.server.headers,
+              strategy: server.headerStrategy,
             })
           } else {
             return next()
@@ -266,6 +269,7 @@ export function transformMiddleware(
             cacheControl: isDep ? 'max-age=31536000,immutable' : 'no-cache',
             headers: server.config.server.headers,
             map: result.map,
+            strategy: server.headerStrategy,
           })
         }
       }

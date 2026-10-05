@@ -32,10 +32,12 @@ const ERR_DENIED_FILE = 'ERR_DENIED_FILE'
 const sirvOptions = ({
   config,
   getHeaders,
+  strategy,
   disableFsServeCheck,
 }: {
   config: ResolvedConfig
   getHeaders: () => OutgoingHttpHeaders | undefined
+  strategy?: import('../headerStrategy').HeaderStrategy
   disableFsServeCheck?: boolean
 }): Options => {
   return {
@@ -51,10 +53,18 @@ const sirvOptions = ({
       if (knownJavascriptExtensionRE.test(pathname)) {
         res.setHeader('Content-Type', 'text/javascript')
       }
-      const headers = getHeaders()
-      if (headers) {
-        for (const name in headers) {
-          res.setHeader(name, headers[name]!)
+      if (strategy) {
+        // Route headers through the explicit strategy layer so the winning
+        // value is determined by declaration priority, not middleware write
+        // order. sirv picks up setHeader values in its send() via
+        // res.getHeader(), so the strategy's values take precedence.
+        strategy.apply(res, 'static')
+      } else {
+        const headers = getHeaders()
+        if (headers) {
+          for (const name in headers) {
+            res.setHeader(name, headers[name]!)
+          }
         }
       }
     },
@@ -87,6 +97,7 @@ export function servePublicMiddleware(
     sirvOptions({
       config: server.config,
       getHeaders: () => server.config.server.headers,
+      strategy: server.headerStrategy,
       disableFsServeCheck: true,
     }),
   )
@@ -130,6 +141,7 @@ export function serveStaticMiddleware(
     sirvOptions({
       config: server.config,
       getHeaders: () => server.config.server.headers,
+      strategy: server.headerStrategy,
     }),
   )
 
@@ -206,6 +218,7 @@ export function serveRawFsMiddleware(
     sirvOptions({
       config: server.config,
       getHeaders: () => server.config.server.headers,
+      strategy: server.headerStrategy,
     }),
   )
 
@@ -375,9 +388,18 @@ Refer to docs https://vite.dev/config/server-options.html#server-fs-allow for co
 
   server.config.logger.error(urlMessage)
   server.config.logger.warnOnce(hintMessage + '\n')
+  const body = renderRestrictedErrorHTML(urlMessage + '\n' + hintMessage)
+  // Apply the error-category strategy so 403 responses get their own cache
+  // headers and business headers cannot override builtin values.
+  server.headerStrategy.apply(res, 'error', body, [
+    {
+      name: 'Content-Type',
+      value: 'text/html',
+      source: 'runtime:static:content-type',
+    },
+  ])
   res.statusCode = 403
-  res.write(renderRestrictedErrorHTML(urlMessage + '\n' + hintMessage))
-  res.end()
+  res.end(body)
 }
 
 function renderRestrictedErrorHTML(msg: string): string {

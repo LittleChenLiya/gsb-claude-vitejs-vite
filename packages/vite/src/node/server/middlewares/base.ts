@@ -1,4 +1,5 @@
 import type { Connect } from '#dep-types/connect'
+import type { ViteDevServer } from '../..'
 import { cleanUrl, withTrailingSlash } from '../../../shared/utils'
 import { joinUrlSegments, stripBase } from '../../utils'
 
@@ -7,6 +8,7 @@ import { joinUrlSegments, stripBase } from '../../utils'
 export function baseMiddleware(
   rawBase: string,
   middlewareMode: boolean,
+  server?: ViteDevServer,
 ): Connect.NextHandleFunction {
   // Keep the named function. The name is visible in debug logs via `DEBUG=connect:dispatcher ...`
   return function viteBaseMiddleware(req, res, next) {
@@ -39,23 +41,40 @@ export function baseMiddleware(
     const redirectPath =
       withTrailingSlash(url) !== base ? joinUrlSegments(base, url) : base
     if (req.headers.accept?.includes('text/html')) {
-      res.writeHead(404, {
-        'Content-Type': 'text/html',
-      })
-      res.end(
+      const body =
         `The server is configured with a public base URL of ${base} - ` +
-          `did you mean to visit <a href="${redirectPath}">${redirectPath}</a> instead?`,
-      )
+        `did you mean to visit <a href="${redirectPath}">${redirectPath}</a> instead?`
+      if (server?.headerStrategy) {
+        server.headerStrategy.apply(res, 'error', body, [
+          {
+            name: 'Content-Type',
+            value: 'text/html',
+            source: 'runtime:base:content-type',
+          },
+        ])
+      } else {
+        res.setHeader('Content-Type', 'text/html')
+      }
+      res.statusCode = 404
+      res.end(body)
       return
     } else {
-      // not found for resources
-      res.writeHead(404, {
-        'Content-Type': 'text/plain',
-      })
-      res.end(
+      const body =
         `The server is configured with a public base URL of ${base} - ` +
-          `did you mean to visit ${redirectPath} instead?`,
-      )
+        `did you mean to visit ${redirectPath} instead?`
+      if (server?.headerStrategy) {
+        server.headerStrategy.apply(res, 'error', body, [
+          {
+            name: 'Content-Type',
+            value: 'text/plain',
+            source: 'runtime:base:content-type',
+          },
+        ])
+      } else {
+        res.setHeader('Content-Type', 'text/plain')
+      }
+      res.statusCode = 404
+      res.end(body)
       return
     }
   }

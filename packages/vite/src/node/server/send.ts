@@ -9,6 +9,7 @@ import getEtag from 'etag'
 import MagicString from 'magic-string'
 import type { SourceMap } from 'rolldown'
 import { createDebugger, removeTimestampQuery } from '../utils'
+import type { HeaderStrategy, RuntimeHeader } from './headerStrategy'
 import { getCodeWithSourcemap } from './sourcemap'
 
 const debug = createDebugger('vite:send', {
@@ -27,6 +28,11 @@ export interface SendOptions {
   cacheControl?: string
   headers?: OutgoingHttpHeaders
   map?: SourceMap | { mappings: '' } | null
+  /**
+   * Explicit header strategy. When provided, headers are resolved by
+   * declaration priority instead of being written last-write-wins.
+   */
+  strategy?: HeaderStrategy
 }
 
 export function send(
@@ -41,6 +47,7 @@ export function send(
     cacheControl = 'no-cache',
     headers,
     map,
+    strategy,
   } = options
 
   if (res.writableEnded) {
@@ -53,17 +60,7 @@ export function send(
     return
   }
 
-  res.setHeader('Content-Type', alias[type] || type)
-  res.setHeader('Cache-Control', cacheControl)
-  res.setHeader('Etag', etag)
-
-  if (headers) {
-    for (const name in headers) {
-      res.setHeader(name, headers[name]!)
-    }
-  }
-
-  // inject source map reference
+  // inject source map reference (may mutate content)
   if (map && 'version' in map && map.mappings) {
     if (type === 'js' || type === 'css') {
       content = getCodeWithSourcemap(type, content.toString(), map)
@@ -88,6 +85,39 @@ export function send(
           includeContent: true,
         }) as SourceMap,
       )
+    }
+  }
+
+  const contentType = alias[type] || type
+
+  if (strategy) {
+    // Route headers through the explicit strategy layer so the winning value
+    // is determined by declaration priority, not middleware write order.
+    // Applied after source-map injection so Content-Length reflects the
+    // final body.
+    const runtime: RuntimeHeader[] = [
+      {
+        name: 'Content-Type',
+        value: contentType,
+        source: 'runtime:send:content-type',
+      },
+      {
+        name: 'Cache-Control',
+        value: cacheControl,
+        source: 'runtime:send:cache-control',
+      },
+      { name: 'Etag', value: etag, source: 'runtime:send:etag' },
+    ]
+    strategy.apply(res, 'transform', content, runtime)
+  } else {
+    res.setHeader('Content-Type', contentType)
+    res.setHeader('Cache-Control', cacheControl)
+    res.setHeader('Etag', etag)
+
+    if (headers) {
+      for (const name in headers) {
+        res.setHeader(name, headers[name]!)
+      }
     }
   }
 

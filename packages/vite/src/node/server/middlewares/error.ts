@@ -71,8 +71,7 @@ export function errorMiddleware(
     if (allowNext) {
       next()
     } else {
-      res.statusCode = 500
-      res.end(`
+      const body = `
         <!DOCTYPE html>
         <html lang="en">
           <head>
@@ -81,7 +80,7 @@ export function errorMiddleware(
             <script type="module">
               const error = ${JSON.stringify(prepareError(err)).replace(
                 /</g,
-                '\\u003c',
+                '\u003c',
               )}
               try {
                 const { ErrorOverlay } = await import(${JSON.stringify(path.posix.join(server.config.base, CLIENT_PUBLIC_PATH))})
@@ -102,7 +101,12 @@ export function errorMiddleware(
           <body>
           </body>
         </html>
-      `)
+      `
+      // Apply the error-category strategy so error responses get their own
+      // cache headers and business headers cannot override builtin values.
+      server.headerStrategy.apply(res, 'error', body)
+      res.statusCode = 500
+      res.end(body)
     }
   }
 }

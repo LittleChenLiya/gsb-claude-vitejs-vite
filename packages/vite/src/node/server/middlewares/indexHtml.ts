@@ -503,7 +503,11 @@ export function indexHtmlMiddleware(
             ? file.source
             : Buffer.from(file.source)
         const headers = server.config.server.headers
-        return send(req, res, html, 'html', { headers, etag: file.etag })
+        return send(req, res, html, 'html', {
+          headers,
+          etag: file.etag,
+          strategy: isDev ? server.headerStrategy : undefined,
+        })
       }
 
       let filePath: string
@@ -542,7 +546,10 @@ export function indexHtmlMiddleware(
           if (isDev) {
             html = await server.transformIndexHtml(url, html, req.originalUrl)
           }
-          return send(req, res, html, 'html', { headers })
+          return send(req, res, html, 'html', {
+            headers,
+            strategy: isDev ? server.headerStrategy : undefined,
+          })
         } catch (e) {
           return next(e)
         }
