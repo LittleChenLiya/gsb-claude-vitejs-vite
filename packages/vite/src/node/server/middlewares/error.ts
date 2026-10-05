@@ -7,6 +7,7 @@ import type { ErrorPayload } from '#types/hmrPayload'
 import type { ViteDevServer } from '../..'
 import { CLIENT_PUBLIC_PATH } from '../../constants'
 import { pad } from '../../utils'
+import { applyResponseHeaders } from '../headerPolicy'
 
 export function prepareError(err: Error | RollupError): ErrorPayload['err'] {
   // only copy the information we need and avoid serializing unnecessary
@@ -72,6 +73,7 @@ export function errorMiddleware(
       next()
     } else {
       res.statusCode = 500
+      applyResponseHeaders(server.headerRegistry, res, 'error')
       res.end(`
         <!DOCTYPE html>
         <html lang="en">

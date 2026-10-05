@@ -74,6 +74,8 @@ import {
 } from '../watch'
 import type { ServerWatchOptions } from '../watch'
 import type { DevEnvironment } from './environment'
+import type { HeaderPolicyOptions, HeaderPolicyRegistry } from './headerPolicy'
+import { createHeaderPolicyRegistry } from './headerPolicy'
 import type { HmrOptions, NormalizedHotChannel, WsOptions } from './hmr'
 import { handleHMRUpdate, updateModules } from './hmr'
 import { baseMiddleware } from './middlewares/base'
@@ -212,6 +214,19 @@ export interface ServerOptions extends CommonServerOptions {
   ) => Promise<void>
 
   forwardConsole?: boolean | ForwardConsoleOptions
+
+  /**
+   * Explicit response header policies registered per response category
+   * (static assets, transformed modules and error responses).
+   *
+   * Each category is applied on top of `server.headers` and Vite's internal
+   * defaults, winning by declared priority. Headers that Vite determines
+   * internally (e.g. `Content-Length`) cannot be overridden, and conflicting
+   * registrations at the same priority are rejected before the server starts.
+   * Multi-value headers such as `Set-Cookie` are preserved as separate header
+   * lines per the HTTP specification.
+   */
+  headerPolicy?: HeaderPolicyOptions
 }
 
 export interface ResolvedServerOptions extends Omit<
@@ -225,6 +240,7 @@ export interface ResolvedServerOptions extends Omit<
     | 'watch'
     | 'origin'
     | 'hotUpdateEnvironments'
+    | 'headerPolicy'
   >,
   'fs' | 'middlewareMode' | 'sourcemapIgnoreList' | 'forwardConsole'
 > {
@@ -365,6 +381,16 @@ export interface ViteDevServer {
    * and hmr state.
    */
   moduleGraph: ModuleGraph
+  /**
+   * The registry of the explicit response header policy layer. Headers are
+   * registered per response category (static assets, transformed modules and
+   * error responses) with a declared priority and source. Plugins can
+   * register additional headers in `configureServer`; conflicting
+   * registrations at the same priority and attempts to override internally
+   * managed headers (e.g. `Content-Length`) are rejected before the server
+   * starts listening.
+   */
+  headerRegistry: HeaderPolicyRegistry
   /**
    * The resolved urls Vite prints on the CLI (URL-encoded). Returns `null`
    * in middleware mode or if the server is not listening on any port.
@@ -537,6 +563,11 @@ export async function _createServer(
     )
   }
 
+  // Validate and register the response header policies before anything else
+  // is started, so conflicting or locked header registrations are rejected
+  // before the server starts.
+  const headerRegistry = createHeaderPolicyRegistry(config.server)
+
   usedConfigs.add(config)
 
   const initPublicFilesPromise = initPublicFiles(config)
@@ -679,6 +710,7 @@ export async function _createServer(
     },
 
     environments,
+    headerRegistry,
     get pluginContainer() {
       warnFutureDeprecation(config, 'removeServerPluginContainer')
       return pluginContainer

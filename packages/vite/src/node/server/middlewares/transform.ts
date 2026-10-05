@@ -30,6 +30,7 @@ import {
   removeImportQuery,
   removeTimestampQuery,
 } from '../../utils'
+import { applyResponseHeaders } from '../headerPolicy'
 import { ERR_CLOSED_SERVER } from '../pluginContainer'
 import { send } from '../send'
 import { applySourcemapIgnoreList } from '../sourcemap'
@@ -178,7 +179,7 @@ export function transformMiddleware(
             )
 
             return send(req, res, JSON.stringify(map), 'json', {
-              headers: server.config.server.headers,
+              policy: { registry: server.headerRegistry, scope: 'transform' },
             })
           } catch {
             // Outdated source map request for optimized deps, this isn't an error
@@ -194,7 +195,7 @@ export function transformMiddleware(
             }
             return send(req, res, JSON.stringify(dummySourceMap), 'json', {
               cacheControl: 'no-cache',
-              headers: server.config.server.headers,
+              policy: { registry: server.headerRegistry, scope: 'transform' },
             })
           }
         } else {
@@ -204,7 +205,7 @@ export function transformMiddleware(
           )?.transformResult?.map
           if (map) {
             return send(req, res, JSON.stringify(map), 'json', {
-              headers: server.config.server.headers,
+              policy: { registry: server.headerRegistry, scope: 'transform' },
             })
           } else {
             return next()
@@ -264,7 +265,7 @@ export function transformMiddleware(
             etag: result.etag,
             // allow browser to cache npm deps!
             cacheControl: isDep ? 'max-age=31536000,immutable' : 'no-cache',
-            headers: server.config.server.headers,
+            policy: { registry: server.headerRegistry, scope: 'transform' },
             map: result.map,
           })
         }
@@ -275,6 +276,7 @@ export function transformMiddleware(
         if (!res.writableEnded) {
           res.statusCode = 504 // status code request timeout
           res.statusMessage = 'Optimize Deps Processing Error'
+          applyResponseHeaders(server.headerRegistry, res, 'error')
           res.end()
         }
         // This timeout is unexpected
@@ -286,6 +288,7 @@ export function transformMiddleware(
         if (!res.writableEnded) {
           res.statusCode = 504 // status code request timeout
           res.statusMessage = 'Outdated Optimize Dep'
+          applyResponseHeaders(server.headerRegistry, res, 'error')
           res.end()
         }
         // We don't need to log an error in this case, the request
@@ -301,6 +304,7 @@ export function transformMiddleware(
         if (!res.writableEnded) {
           res.statusCode = 504 // status code request timeout
           res.statusMessage = 'Outdated Request'
+          applyResponseHeaders(server.headerRegistry, res, 'error')
           res.end()
         }
         // We don't need to log an error in this case, the request
@@ -315,6 +319,7 @@ export function transformMiddleware(
         // Skip if response has already been sent
         if (!res.writableEnded) {
           res.statusCode = 404
+          applyResponseHeaders(server.headerRegistry, res, 'error')
           res.end()
         }
         server.config.logger.warn(colors.yellow(e.message))

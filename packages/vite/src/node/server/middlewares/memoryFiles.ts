@@ -2,6 +2,7 @@ import * as mrmime from 'mrmime'
 import type { Connect } from '#dep-types/connect'
 import type { ViteDevServer } from '..'
 import { cleanUrl } from '../../../shared/utils'
+import { applyResponseHeaders } from '../headerPolicy'
 
 export function memoryFilesMiddleware(
   server: ViteDevServer,
@@ -11,7 +12,6 @@ export function memoryFilesMiddleware(
   if (!bundledDev || !memoryFiles) {
     throw new Error('memoryFilesMiddleware can only be used for fullBundleMode')
   }
-  const headers = server.config.server.headers
 
   return function viteMemoryFilesMiddleware(req, res, next) {
     const cleanedUrl = cleanUrl(req.url!)
@@ -36,17 +36,14 @@ export function memoryFilesMiddleware(
           res.end()
           return
         }
-        res.setHeader('Etag', file.etag)
       }
 
       const mime = mrmime.lookup(filePath)
-      if (mime) {
-        res.setHeader('Content-Type', mime)
-      }
 
-      for (const name in headers) {
-        res.setHeader(name, headers[name]!)
-      }
+      applyResponseHeaders(server.headerRegistry, res, 'static', {
+        ...(file.etag ? { Etag: file.etag } : {}),
+        ...(mime ? { 'Content-Type': mime } : {}),
+      })
 
       return res.end(file.source)
     }

@@ -9,6 +9,8 @@ import getEtag from 'etag'
 import MagicString from 'magic-string'
 import type { SourceMap } from 'rolldown'
 import { createDebugger, removeTimestampQuery } from '../utils'
+import type { HeaderPolicyRegistry, HeaderPolicyScope } from './headerPolicy'
+import { applyResponseHeaders } from './headerPolicy'
 import { getCodeWithSourcemap } from './sourcemap'
 
 const debug = createDebugger('vite:send', {
@@ -26,6 +28,15 @@ export interface SendOptions {
   etag?: string
   cacheControl?: string
   headers?: OutgoingHttpHeaders
+  /**
+   * When provided, `Content-Type`, `Cache-Control` and `Etag` participate in
+   * the header policy layer as internal defaults and the registered policy
+   * for `scope` is applied on top, recording the winning source per header.
+   */
+  policy?: {
+    registry: HeaderPolicyRegistry
+    scope: HeaderPolicyScope
+  }
   map?: SourceMap | { mappings: '' } | null
 }
 
@@ -40,6 +51,7 @@ export function send(
     etag = getEtag(content, { weak: true }),
     cacheControl = 'no-cache',
     headers,
+    policy,
     map,
   } = options
 
@@ -53,9 +65,17 @@ export function send(
     return
   }
 
-  res.setHeader('Content-Type', alias[type] || type)
-  res.setHeader('Cache-Control', cacheControl)
-  res.setHeader('Etag', etag)
+  if (policy) {
+    applyResponseHeaders(policy.registry, res, policy.scope, {
+      'Content-Type': alias[type] || type,
+      'Cache-Control': cacheControl,
+      Etag: etag,
+    })
+  } else {
+    res.setHeader('Content-Type', alias[type] || type)
+    res.setHeader('Cache-Control', cacheControl)
+    res.setHeader('Etag', etag)
+  }
 
   if (headers) {
     for (const name in headers) {

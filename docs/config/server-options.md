@@ -185,6 +185,27 @@ Setting `server.cors` to `true` allows any website to send requests to your dev 
 
 Specify server response headers.
 
+## server.headerPolicy
+
+- **Type:** `{ static?: OutgoingHttpHeaders, transform?: OutgoingHttpHeaders, error?: OutgoingHttpHeaders }`
+
+Explicit response header policies for the dev server, registered per response category instead of relying on middleware write order:
+
+- `static`: responses served from the filesystem (public dir, project root, `/@fs/`)
+- `transform`: responses produced by the transform pipeline (modules, source maps)
+- `error`: error responses (500 error overlay page, 403 restricted, 504 outdated requests)
+
+Each category is layered on top of Vite's internal defaults and `server.headers` by declared priority (`internal` < `server.headers` < `server.headerPolicy.*`), so for example a transformed module response and a static asset response can each get their own `Cache-Control` value.
+
+The policy layer guarantees:
+
+- **Startup validation**: conflicting registrations for the same header at the same priority (e.g. from `server.headerPolicy.*` and a plugin calling `server.headerRegistry.register()` in `configureServer`) are rejected before the server starts listening.
+- **Locked internal headers**: headers Vite determines per response, such as `Content-Length`, cannot be overridden by business configuration and are rejected at startup.
+- **HTTP multi-value rules**: `Set-Cookie` values from several sources are emitted as separate header lines and never joined into a comma-separated string; list-based headers such as `Vary` are combined per RFC 9110.
+- **Source attribution**: the winning source of every applied header is recorded for each request and can be read with `getResponseHeaderSources(res)` (exported from `vite`), e.g. `{ 'cache-control': 'server.headerPolicy.transform' }`.
+
+The default behavior of [`server.headers`](#server-headers) is unchanged: it applies to every response category and wins over Vite's internal defaults, but scoped `server.headerPolicy.*` registrations take precedence over it.
+
 ## server.hmr
 
 - **Type:** `boolean | { overlay?: boolean }`

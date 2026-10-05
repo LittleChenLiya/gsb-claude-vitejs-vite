@@ -96,6 +96,18 @@ export {
   rolldownVersion,
 } from './utils'
 export { send } from './server/send'
+export {
+  HeaderPolicyRegistry,
+  HEADER_POLICY_PRIORITY,
+  applyResponseHeaders,
+  getResponseHeaderSources,
+} from './server/headerPolicy'
+export type {
+  HeaderPolicyOptions,
+  HeaderPolicyScope,
+  HeaderRegistration,
+  ResolvedHeader,
+} from './server/headerPolicy'
 export { createLogger } from './logger'
 export { searchForWorkspaceRoot } from './server/searchRoot'
 

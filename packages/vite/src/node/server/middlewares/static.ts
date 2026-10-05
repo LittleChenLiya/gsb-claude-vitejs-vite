@@ -1,4 +1,4 @@
-import type { OutgoingHttpHeaders, ServerResponse } from 'node:http'
+import type { ServerResponse } from 'node:http'
 import path from 'node:path'
 import escapeHtml from 'escape-html'
 import type { Options } from 'sirv'
@@ -25,17 +25,18 @@ import {
   removeLeadingSlash,
   urlRE,
 } from '../../utils'
+import { applyResponseHeaders } from '../headerPolicy'
 
 const knownJavascriptExtensionRE = /\.(?:[tj]sx?|[cm][tj]s)$/
 const ERR_DENIED_FILE = 'ERR_DENIED_FILE'
 
 const sirvOptions = ({
   config,
-  getHeaders,
+  applyPolicy,
   disableFsServeCheck,
 }: {
   config: ResolvedConfig
-  getHeaders: () => OutgoingHttpHeaders | undefined
+  applyPolicy: (res: ServerResponse) => void
   disableFsServeCheck?: boolean
 }): Options => {
   return {
@@ -51,12 +52,7 @@ const sirvOptions = ({
       if (knownJavascriptExtensionRE.test(pathname)) {
         res.setHeader('Content-Type', 'text/javascript')
       }
-      const headers = getHeaders()
-      if (headers) {
-        for (const name in headers) {
-          res.setHeader(name, headers[name]!)
-        }
-      }
+      applyPolicy(res)
     },
     shouldServe: disableFsServeCheck
       ? undefined
@@ -86,7 +82,8 @@ export function servePublicMiddleware(
     dir,
     sirvOptions({
       config: server.config,
-      getHeaders: () => server.config.server.headers,
+      applyPolicy: (res) =>
+        applyResponseHeaders(server.headerRegistry, res, 'static'),
       disableFsServeCheck: true,
     }),
   )
@@ -129,7 +126,8 @@ export function serveStaticMiddleware(
     dir,
     sirvOptions({
       config: server.config,
-      getHeaders: () => server.config.server.headers,
+      applyPolicy: (res) =>
+        applyResponseHeaders(server.headerRegistry, res, 'static'),
     }),
   )
 
@@ -205,7 +203,8 @@ export function serveRawFsMiddleware(
     '/',
     sirvOptions({
       config: server.config,
-      getHeaders: () => server.config.server.headers,
+      applyPolicy: (res) =>
+        applyResponseHeaders(server.headerRegistry, res, 'static'),
     }),
   )
 
@@ -376,6 +375,7 @@ Refer to docs https://vite.dev/config/server-options.html#server-fs-allow for co
   server.config.logger.error(urlMessage)
   server.config.logger.warnOnce(hintMessage + '\n')
   res.statusCode = 403
+  applyResponseHeaders(server.headerRegistry, res, 'error')
   res.write(renderRestrictedErrorHTML(urlMessage + '\n' + hintMessage))
   res.end()
 }
